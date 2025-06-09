@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inteligentne Oświetlenie v3.3</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="background-gradient"></div>
+    <div class="container" id="appContainer">
+
+        <div id="loginScreen" class="login-screen">
+            <div class="login-card glass">
+                <h1><i class="fa-solid fa-lock"></i> Panel Domowy</h1>
+                <form id="loginForm" autocomplete="off">
+                    <input type="password" id="loginPassword" placeholder="Podaj hasło" required autofocus>
+                    <button type="submit" class="login-btn">Zaloguj</button>
+                    <p id="loginError" class="login-error"></p>
+                </form>
+            </div>
+        </div>
+
+        <div id="mainPanel" style="display:none;">
+            <header class="main-header glass">
+                <h1><i class="fa-solid fa-brain-circuit"></i> Inteligentne Oświetlenie 3.3</h1>
+            </header>
+
+            <main class="main-content">
+
+                <section id="ledControlCard" class="card led-control-panel glass">
+                    <h3 class="card-title"><i class="fa-solid fa-lightbulb"></i> Sterowanie Główne</h3>
+                    <div class="led-info">
+                        <h2 id="ledStatus">Ładowanie...</h2>
+                        <p id="ledTimer"></p>
+                    </div>
+                    <div class="progress-bar-container" id="ledProgressBg">
+                        <div class="progress-bar" id="ledProgressBar"></div>
+                    </div>
+                    <button class="toggle-button animated-btn" onclick="toggleLed()">
+                        <span>Przełącz Oświetlenie</span>
+                    </button>
+                </section>
+
+                <section class="card status-weather-panel glass">
+                    <h3 class="card-title"><i class="fa-solid fa-circle-info"></i> Status & Pogoda</h3>
+                    <div class="weather-display">
+                        <i id="weatherIcon" class="fa-solid fa-spinner fa-spin weather-icon"></i>
+                        <div class="weather-details">
+                            <h2 id="temperature">--°C</h2>
+                            <p id="weatherDescription">Ładowanie pogody...</p>
+                        </div>
+                    </div>
+                    <p class="location-name"><i class="fa-solid fa-location-dot"></i> <span id="locationName">...</span></p>
+                    <div class="sun-info">
+                        <span><i class="fa-solid fa-sunrise"></i> Wschód: <b id="sunrise">...</b></span>
+                        <span><i class="fa-solid fa-sunset"></i> Zachód: <b id="sunset">...</b></span>
+                    </div>
+                    <div id="pirStatus" class="pir-status">
+                        <i class="fa-solid fa-circle-notch fa-spin"></i> Ładowanie statusu PIR...
+                    </div>
+                </section>
+                
+                <section class="card ldr-panel glass">
+                    <h3 class="card-title"><i class="fa-solid fa-sliders"></i> Automatyka & Progi LDR</h3>
+                    <div class="automation-mode">
+                        <span class="mode-label">Tryb Słońce</span>
+                        <label class="switch">
+                            <input type="checkbox" id="modeSelect" onchange="setControlMode(this.checked ? 1 : 0)">
+                            <span class="slider"></span>
+                        </label>
+                        <span class="mode-label">Tryb LDR</span>
+                    </div>
+                    <div class="ldr-chart-container">
+                        <canvas id="ldrChart"></canvas>
+                        <div class="chart-center-text">
+                            <span id="ldrValue">...</span>
+                            <small>LDR</small>
+                        </div>
+                    </div>
+                    <div class="ldr-config">
+                        <h4>Ustaw Progi Aktywacji</h4>
+                        <div class="range-group">
+                            <label for="ldrThresholdLow">MIN</label>
+                            <input type="range" id="ldrThresholdLowSlider" min="0" max="1023" step="1" oninput="onRangeInputSliderLow()">
+                            <input type="number" id="ldrThresholdLow" min="0" max="1023" onchange="onRangeInputNum()">
+                        </div>
+                        <div class="range-group">
+                            <label for="ldrThresholdHigh">MAX</label>
+                            <input type="range" id="ldrThresholdHighSlider" min="0" max="1023" step="1" oninput="onRangeInputSliderHigh()">
+                            <input type="number" id="ldrThresholdHigh" min="0" max="1023" onchange="onRangeInputNum()">
+                        </div>
+                        <button class="reset-button animated-btn" onclick="resetLdrSettings()"><i class="fa-solid fa-arrows-rotate"></i> Resetuj Progi</button>
+                    </div>
+                </section>
+
+                <section class="card logs-panel glass">
+                    <h3 class="card-title"><i class="fa-solid fa-list-ul"></i> Dziennik Zdarzeń</h3>
+                    <div id="logsList" class="logs-list">
+                        <div class="log-item"><i class="fa-solid fa-spinner fa-spin"></i> Ładowanie logów...</div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+    <script src="js/script.js"></script>
+</body>
+</html>

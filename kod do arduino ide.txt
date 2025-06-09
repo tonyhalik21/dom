@@ -1,0 +1,545 @@
+#include <ESP8266WiFi.h>
+#include <WebSocketsServer.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <ArduinoJson.h>
+#include <ArduinoOTA.h>
+#include <SunPosition.h>
+#include <EEPROM.h>
+
+// --- KONFIGURACJA UŻYTKOWNIKA ---
+const char* ssid = "Orange_Swiatlowod_FF20";
+const char* password = "qwertyui73";
+const char* ota_password = "dom73";
+
+// --- KONFIGURACJA POGODY ---
+const char* weather_api_key = "92908d49e8711defa26beca0a53e30ae";
+const char* weather_location_query = "32-015,PL";
+const unsigned long WEATHER_UPDATE_INTERVAL = 30UL * 60 * 1000;
+unsigned long lastWeatherUpdateTime = 0;
+
+// --- Konfiguracja DuckDNS ---
+const char* duckdns_domain = "sterowanieesp12.duckdns.org";
+const char* duckdns_token = "8eb419fa-a05e-4620-a430-dd04bf1f58e9";
+const unsigned long DUCKDNS_UPDATE_INTERVAL = 12UL * 60 * 60 * 1000;
+unsigned long lastDuckDNSTime = 0;
+
+// Zmienne pogodowe
+float currentTemperature = -99.0;
+int weatherId = 0;
+String weatherDescription = "Brak danych";
+String currentCityName = "Ładowanie...";
+
+// Definicje Pinów
+const int LED_PIN = D1;
+const int PIR_PIN = D2;
+const int BUTTON_PIN = D3;
+const int LDR_PIN = A0;
+
+// Zmienne Stanu
+volatile bool pirInterruptFlag = false;
+static bool pirTriggeredDuringCurrentLedOn = false;
+bool ledState = false;
+unsigned long ledOffTime = 0;
+String ledSource = "Manualnie";
+unsigned long pirInhibitEndTime = 0;
+const unsigned long PIR_INHIBIT_DURATION = 3000;
+
+// Czasy Działania LED
+const unsigned long BUTTON_ON_DURATION = 2UL * 60 * 60 * 1000;
+const unsigned long WWW_ON_DURATION = 5UL * 60 * 1000;
+const unsigned long PIR_AFTER_MOTION_DELAY = 60UL * 1000;
+
+// Zmienne do obsługi przycisku
+const unsigned long DEBOUNCE_DELAY = 50;
+unsigned long lastDebounceTime = 0;
+int buttonState = HIGH;
+int lastButtonStateRaw = HIGH;
+
+// Serwer WebSocket na porcie 81
+WebSocketsServer webSocket = WebSocketsServer(81);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7200, 60000);
+
+// Logi Zdarzeń
+const int MAX_LOG_ENTRIES = 50;
+String logs[MAX_LOG_ENTRIES];
+int logCount = 0;
+
+// Konfiguracja Geograficzna
+const float LATITUDE = 50.0647;
+const float LONGITUDE = 19.9450;
+const float GMT_OFFSET_HOURS = 2.0;
+
+// Zmienne Logiki PIR i LDR
+bool isPirActiveByDaylight = false;
+String sunriseTimeStr = "N/A";
+String sunsetTimeStr = "N/A";
+
+// ZMIENNE DO WYGŁADZANIA ODCZYTU LDR
+const int LDR_READINGS_COUNT = 10;
+int ldrReadings[LDR_READINGS_COUNT];
+int ldrReadingsIndex = 0;
+long ldrTotal = 0;
+int ldrValue = 0;
+
+// ZMIENNE TRYBU DIAGNOSTYCZNEGO
+unsigned long lastLdrBroadcastTime = 0;
+const unsigned long LDR_BROADCAST_INTERVAL = 2000; // Wysyłaj status co 2 sekundy
+
+// Domyślne wartości do EEPROM
+const int LDR_DEFAULT_LOW = 500;
+const int LDR_DEFAULT_HIGH = 1023;
+const int CONTROL_MODE_DEFAULT = 1;
+// Zmienne z EEPROM
+int ldrThresholdLow = LDR_DEFAULT_LOW;
+int ldrThresholdHigh = LDR_DEFAULT_HIGH;
+int controlMode = CONTROL_MODE_DEFAULT;
+// Konfiguracja EEPROM
+#define EEPROM_SIZE          16 
+#define EEPROM_MAGIC_ADDR     0 
+#define EEPROM_LDR_LOW_ADDR   2 
+#define EEPROM_LDR_HIGH_ADDR  6 
+#define EEPROM_MODE_ADDR     10 
+#define EEPROM_MAGIC_VALUE 0xDA 
+
+// --- DEKLARACJE FUNKCJI ---
+void broadcastStatus();
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
+String getStatusJson();
+void addLog(String message);
+void saveSettingsToEEPROM();
+void loadSettingsFromEEPROM();
+void turnLedOn(unsigned long duration, String source);
+void resetLedOnByPir(unsigned long duration);
+void turnLedOff(String source);
+void fetchWeatherData();
+void IRAM_ATTR pirISR();
+void reconnectWiFi();
+void updateDuckDNS();
+void updateSunriseSunset();
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  
+  EEPROM.begin(EEPROM_SIZE);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  pinMode(PIR_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIR_PIN), pirISR, RISING);
+
+  int initialLdr = analogRead(LDR_PIN);
+  for (int i = 0; i < LDR_READINGS_COUNT; i++) {
+    ldrReadings[i] = initialLdr;
+  }
+  ldrTotal = initialLdr * LDR_READINGS_COUNT;
+  ldrValue = initialLdr;
+
+  loadSettingsFromEEPROM();
+
+  buttonState = digitalRead(BUTTON_PIN);
+  lastButtonStateRaw = buttonState;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 40) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    addLog("WiFi OK. IP: " + WiFi.localIP().toString());
+  } else {
+    addLog("WiFi ERR. Restarting...");
+    delay(1000);
+    ESP.restart();
+  }
+  
+  timeClient.begin();
+  addLog("Synchronizacja czasu NTP...");
+  
+  ArduinoOTA.setHostname("inteligentne-oswietlenie");
+  ArduinoOTA.setPassword(ota_password);
+  ArduinoOTA.begin();
+  addLog("OTA OK");
+  
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+  addLog("WebSocket API OK na porcie 81");
+
+  lastDuckDNSTime = 0;
+}
+
+void loop() {
+  ArduinoOTA.handle();
+  webSocket.loop();
+  
+  static unsigned long lastWeatherCheck = 0;
+  if (millis() - lastWeatherCheck > WEATHER_UPDATE_INTERVAL || lastWeatherCheck == 0) {
+      fetchWeatherData();
+      lastWeatherCheck = millis();
+  }
+
+  static unsigned long lastSunriseSunsetUpdateTime = 0;
+  if (!timeClient.isTimeSet() || millis() - lastSunriseSunsetUpdateTime >= 3600000UL) {
+    updateSunriseSunset();
+    lastSunriseSunsetUpdateTime = millis();
+  }
+
+  // --- LOGIKA DIAGNOSTYCZNA LDR ---
+  int rawLdrValue = analogRead(LDR_PIN);
+  ldrTotal -= ldrReadings[ldrReadingsIndex];
+  ldrReadings[ldrReadingsIndex] = rawLdrValue;
+  ldrTotal += ldrReadings[ldrReadingsIndex];
+  ldrReadingsIndex++;
+  if (ldrReadingsIndex >= LDR_READINGS_COUNT) {
+    ldrReadingsIndex = 0;
+  }
+  int newSmoothedValue = ldrTotal / LDR_READINGS_COUNT;
+  Serial.printf("Raw LDR: %4d, Smoothed LDR: %4d\n", rawLdrValue, newSmoothedValue);
+
+  ldrValue = newSmoothedValue;
+  if (ldrValue > 1023) ldrValue = 1023;
+
+  if (millis() - lastLdrBroadcastTime > LDR_BROADCAST_INTERVAL) {
+    lastLdrBroadcastTime = millis();
+    broadcastStatus();
+  }
+
+  bool pirCanTrigger = (controlMode == 0)
+    ? isPirActiveByDaylight
+    : (ldrValue >= ldrThresholdLow && ldrValue <= ldrThresholdHigh);
+  if (pirInterruptFlag && millis() >= pirInhibitEndTime) {
+    pirInterruptFlag = false;
+    if (ledState && ledSource == "PIR") {
+      resetLedOnByPir(PIR_AFTER_MOTION_DELAY);
+    } 
+    else if (!ledState && pirCanTrigger) {
+      turnLedOn(PIR_AFTER_MOTION_DELAY, "PIR");
+    }
+  }
+
+  if (ledState && ledOffTime != 0 && millis() >= ledOffTime) {
+    turnLedOff("Automatyczne");
+  }
+
+  int reading = digitalRead(BUTTON_PIN);
+  if (reading != lastButtonStateRaw) {
+    lastDebounceTime = millis();
+  }
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      if (buttonState == LOW) {
+        if (ledState) turnLedOff("Przycisk");
+        else turnLedOn(BUTTON_ON_DURATION, "Przycisk");
+      }
+    }
+  }
+  lastButtonStateRaw = reading;
+
+  static unsigned long lastWiFiCheck = 0;
+  if (millis() - lastWiFiCheck > 10000) {
+    lastWiFiCheck = millis();
+    reconnectWiFi();
+    updateDuckDNS();
+  }
+
+  delay(10);
+}
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Odłączono!\n", num);
+      break;
+    case WStype_CONNECTED: {
+      IPAddress ip = webSocket.remoteIP(num);
+      Serial.printf("[%u] Połączono z %d.%d.%d.%d\n", num, ip[0], ip[1], ip[2], ip[3]);
+      String statusJson = getStatusJson();
+      webSocket.sendTXT(num, statusJson);
+      break;
+    }
+    case WStype_TEXT: {
+      Serial.printf("[%u] Odebrano tekst: %s\n", num, payload);
+      StaticJsonDocument<256> doc;
+      deserializeJson(doc, payload);
+
+      const char* action = doc["action"];
+
+      if (strcmp(action, "toggle_www") == 0) {
+        if (ledState) {
+          turnLedOff("WWW");
+        }
+        else {
+          turnLedOn(WWW_ON_DURATION, "WWW");
+        }
+      } 
+      else if (strcmp(action, "reset_ldr") == 0) {
+        ldrThresholdLow = LDR_DEFAULT_LOW;
+        ldrThresholdHigh = LDR_DEFAULT_HIGH;
+        addLog("LDR Reset do domyślnych.");
+        saveSettingsToEEPROM();
+      }
+      else if (strcmp(action, "set_ldr_threshold_range") == 0) {
+        ldrThresholdLow = doc["low"];
+        ldrThresholdHigh = doc["high"];
+        addLog("LDR prog: " + String(ldrThresholdLow) + "-" + String(ldrThresholdHigh));
+        saveSettingsToEEPROM();
+      }
+      else if (strcmp(action, "set_control_mode") == 0) {
+        int mode = doc["mode"];
+        if (mode == 0 || mode == 1) {
+          controlMode = mode;
+          addLog((mode == 0) ? "TRYB: Słońce" : "TRYB: LDR");
+          saveSettingsToEEPROM();
+        }
+      }
+      break;
+    }
+  }
+}
+
+void broadcastStatus() {
+  String json = getStatusJson();
+  webSocket.broadcastTXT(json);
+}
+
+String getStatusJson() {
+  StaticJsonDocument<3072> doc;
+  doc["ledState"] = ledState;
+  doc["ledSource"] = ledSource;
+  long timeRemainingSeconds = 0;
+  if (ledState && ledOffTime != 0 && ledOffTime > millis()) {
+    timeRemainingSeconds = (ledOffTime - millis() + 500) / 1000;
+  }
+  doc["timeRemaining"] = timeRemainingSeconds;
+  doc["sunriseTime"] = sunriseTimeStr;
+  doc["sunsetTime"] = sunsetTimeStr;
+  doc["ldrValue"] = ldrValue;
+  doc["ldrThresholdLow"] = ldrThresholdLow;
+  doc["ldrThresholdHigh"] = ldrThresholdHigh;
+  doc["controlMode"] = controlMode;
+  bool currentPirActivationStatus = (controlMode == 0) ? isPirActiveByDaylight : (ldrValue >= ldrThresholdLow && ldrValue <= ldrThresholdHigh);
+  doc["isPirActive"] = currentPirActivationStatus;
+  doc["temperature"] = currentTemperature;
+  doc["weatherId"] = weatherId;
+  doc["weatherDescription"] = weatherDescription;
+  doc["locationName"] = currentCityName;
+  JsonArray logArray = doc.createNestedArray("logs");
+  for (int i = 0; i < logCount; i++) {
+    logArray.add(logs[i]);
+  }
+  String output;
+  serializeJson(doc, output);
+  return output;
+}
+
+void addLog(String message) {
+  if (logCount < MAX_LOG_ENTRIES) {
+    for (int i = logCount; i > 0; i--) logs[i] = logs[i - 1];
+    logCount++;
+  } else {
+    for (int i = MAX_LOG_ENTRIES - 1; i > 0; i--) logs[i] = logs[i - 1];
+  }
+  if (timeClient.isTimeSet()) {
+    String timestamp = timeClient.getFormattedTime();
+    logs[0] = "[" + timestamp + "] " + message;
+  } else {
+    logs[0] = "[Brak Czasu] " + message;
+  }
+  Serial.println(logs[0]);
+  broadcastStatus();
+}
+
+void saveSettingsToEEPROM() {
+  EEPROM.put(EEPROM_LDR_LOW_ADDR, ldrThresholdLow);
+  EEPROM.put(EEPROM_LDR_HIGH_ADDR, ldrThresholdHigh);
+  EEPROM.put(EEPROM_MODE_ADDR, controlMode);
+  if (EEPROM.commit()) { 
+    addLog("Zapisano ustawienia w EEPROM.");
+  } else { 
+    addLog("Błąd zapisu do EEPROM!"); 
+  }
+  broadcastStatus();
+}
+
+void loadSettingsFromEEPROM() {
+  uint16_t magicValue;
+  EEPROM.get(EEPROM_MAGIC_ADDR, magicValue);
+  if (magicValue == EEPROM_MAGIC_VALUE) {
+    addLog("Odczytano ustawienia z EEPROM.");
+    EEPROM.get(EEPROM_LDR_LOW_ADDR, ldrThresholdLow);
+    EEPROM.get(EEPROM_LDR_HIGH_ADDR, ldrThresholdHigh);
+    EEPROM.get(EEPROM_MODE_ADDR, controlMode);
+  } else {
+    addLog("EEPROM pusty. Zapisywanie domyślnych.");
+    ldrThresholdLow = LDR_DEFAULT_LOW;
+    ldrThresholdHigh = LDR_DEFAULT_HIGH;
+    controlMode = CONTROL_MODE_DEFAULT;
+    EEPROM.put(EEPROM_MAGIC_ADDR, (uint16_t)EEPROM_MAGIC_VALUE);
+    saveSettingsToEEPROM();
+  }
+}
+
+void turnLedOn(unsigned long duration, String source) {
+  bool logIt = true;
+  if (source == "PIR" && pirTriggeredDuringCurrentLedOn) logIt = false;
+  pirTriggeredDuringCurrentLedOn = (source == "PIR");
+  digitalWrite(LED_PIN, HIGH);
+  ledState = true;
+  ledOffTime = millis() + duration;
+  ledSource = source;
+  if (logIt) addLog(source + " ON");
+  else broadcastStatus();
+}
+
+void resetLedOnByPir(unsigned long duration) {
+  if (ledState && ledSource == "PIR") {
+    ledOffTime = millis() + duration;
+    broadcastStatus();
+  }
+}
+
+void turnLedOff(String source) {
+  if (ledState) {
+    digitalWrite(LED_PIN, LOW);
+    ledState = false;
+    ledOffTime = 0;
+    addLog(source + " OFF");
+    if (source == "Przycisk" || source == "WWW") {
+      pirInhibitEndTime = millis() + PIR_INHIBIT_DURATION;
+    }
+    pirTriggeredDuringCurrentLedOn = false;
+    broadcastStatus();
+  }
+}
+
+void fetchWeatherData() {
+  detachInterrupt(digitalPinToInterrupt(PIR_PIN));
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://api.openweathermap.org/data/2.5/weather?zip=";
+  url += weather_location_query;
+  url += "&appid=";
+  url += weather_api_key;
+  url += "&units=metric&lang=pl";
+  if(http.begin(client, url)) {
+    addLog("Pobieram pogodę dla Twojej lokalizacji...");
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(2048);
+      deserializeJson(doc, payload);
+      currentTemperature = doc["main"]["temp"];
+      weatherId = doc["weather"][0]["id"];
+      weatherDescription = doc["weather"][0]["description"].as<String>();
+      currentCityName = doc["name"].as<String>();
+      addLog("Pogoda OK: " + currentCityName + ", " + String(currentTemperature, 1) + "C, " + weatherDescription);
+    } else {
+      addLog("Błąd pogody, HTTP: " + String(httpCode));
+      currentCityName = "Błąd Lokalizacji";
+    }
+    http.end();
+  } else {
+      addLog("Błąd połączenia z serwerem pogody.");
+  }
+  attachInterrupt(digitalPinToInterrupt(PIR_PIN), pirISR, RISING);
+  broadcastStatus();
+}
+
+void IRAM_ATTR pirISR() {
+  pirInterruptFlag = true;
+}
+
+void reconnectWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    addLog("WiFi reconnect...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+  }
+}
+
+void updateDuckDNS() {
+  if (millis() - lastDuckDNSTime >= DUCKDNS_UPDATE_INTERVAL || lastDuckDNSTime == 0) {
+    detachInterrupt(digitalPinToInterrupt(PIR_PIN));
+    addLog("DuckDNS update...");
+    WiFiClient client;
+    HTTPClient http;
+    String url = "http://www.duckdns.org/update?domains=";
+    url += duckdns_domain;
+    url += "&token=";
+    url += duckdns_token;
+    url += "&ip=";
+    http.begin(client, url);
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      String payload = http.getString();
+      if (payload.indexOf("OK") != -1) addLog("DuckDNS OK");
+      else addLog("DuckDNS ERR: " + payload);
+    } else {
+      addLog("DuckDNS ERR: HTTP " + String(httpCode));
+    }
+    http.end();
+    lastDuckDNSTime = millis();
+    attachInterrupt(digitalPinToInterrupt(PIR_PIN), pirISR, RISING);
+  }
+}
+
+void updateSunriseSunset() {
+  detachInterrupt(digitalPinToInterrupt(PIR_PIN));
+  timeClient.update();
+  if (!timeClient.isTimeSet()) {
+      addLog("Nie można obliczyć wschodu/zachodu - brak czasu NTP.");
+      sunriseTimeStr = "Brak NTP";
+      sunsetTimeStr = "Brak NTP";
+      isPirActiveByDaylight = false;
+      attachInterrupt(digitalPinToInterrupt(PIR_PIN), pirISR, RISING);
+      return;
+  }
+  
+  static time_t lastCalcDay = 0;
+  time_t nowEpoch = timeClient.getEpochTime();
+  if (gmtime(&nowEpoch)->tm_yday != lastCalcDay || sunriseTimeStr == "N/A" || sunriseTimeStr == "Brak NTP") {
+    SunPosition currentSun(LATITUDE, LONGITUDE, nowEpoch, GMT_OFFSET_HOURS * 60);
+    double sunriseMinutesLocal = currentSun.sunrise();
+    double sunsetMinutesLocal = currentSun.sunset();
+
+    if (!isnan(sunriseMinutesLocal) && !isnan(sunsetMinutesLocal)) {
+      int sr_h = floor(sunriseMinutesLocal / 60.0);
+      int sr_m = round(fmod(sunriseMinutesLocal, 60.0));
+      int ss_h = floor(sunsetMinutesLocal / 60.0);
+      int ss_m = round(fmod(sunsetMinutesLocal, 60.0));
+      char buffer[6];
+      sprintf(buffer, "%02d:%02d", sr_h, sr_m);
+      sunriseTimeStr = String(buffer);
+      sprintf(buffer, "%02d:%02d", ss_h, ss_m);
+      sunsetTimeStr = String(buffer);
+      addLog("Słońce: W:" + sunriseTimeStr + ", Z:" + sunsetTimeStr);
+    } else {
+       sunriseTimeStr = "Błąd Oblicz.";
+       sunsetTimeStr = "Błąd Oblicz.";
+    }
+    lastCalcDay = gmtime(&nowEpoch)->tm_yday;
+  }
+
+  long currentDaySeconds = timeClient.getHours() * 3600L + timeClient.getMinutes() * 60L;
+  SunPosition currentSunNow(LATITUDE, LONGITUDE, nowEpoch, GMT_OFFSET_HOURS * 60);
+  long sunriseSecLocal = (long)(currentSunNow.sunrise() * 60);
+  long sunsetSecLocal = (long)(currentSunNow.sunset() * 60);
+  long startPirActiveSec = sunsetSecLocal - 1800L;
+  long endPirActiveSec = sunriseSecLocal + 1800L;
+  if (startPirActiveSec < endPirActiveSec) {
+    isPirActiveByDaylight = (currentDaySeconds >= startPirActiveSec && currentDaySeconds < endPirActiveSec);
+  } else {
+    isPirActiveByDaylight = (currentDaySeconds >= startPirActiveSec || currentDaySeconds < endPirActiveSec);
+  }
+  attachInterrupt(digitalPinToInterrupt(PIR_PIN), pirISR, RISING);
+  broadcastStatus();
+}
