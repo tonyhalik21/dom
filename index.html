@@ -13,7 +13,6 @@
 <body>
     <div class="background-gradient"></div>
     <div class="container" id="appContainer">
-
         <div id="loginScreen" class="login-screen">
             <div class="login-card glass">
                 <h1><i class="fa-solid fa-lock"></i> Panel Domowy</h1>
@@ -24,14 +23,11 @@
                 </form>
             </div>
         </div>
-
         <div id="mainPanel" style="display:none;">
             <header class="main-header glass">
                 <h1><i class="fa-solid fa-brain-circuit"></i> Inteligentne Oświetlenie 3.3</h1>
             </header>
-
             <main class="main-content">
-
                 <section id="ledControlCard" class="card led-control-panel glass">
                     <h3 class="card-title"><i class="fa-solid fa-lightbulb"></i> Sterowanie Główne</h3>
                     <div class="led-info">
@@ -41,11 +37,17 @@
                     <div class="progress-bar-container" id="ledProgressBg">
                         <div class="progress-bar" id="ledProgressBar"></div>
                     </div>
+
+                    <div class="brightness-control" id="brightnessControlContainer" style="display: none;">
+                        <i class="fa-solid fa-moon"></i>
+                        <input type="range" id="brightnessSlider" min="50" max="1023" step="1">
+                        <i class="fa-solid fa-sun"></i>
+                    </div>
+
                     <button class="toggle-button animated-btn" onclick="toggleLed()">
                         <span>Przełącz Oświetlenie</span>
                     </button>
                 </section>
-
                 <section class="card status-weather-panel glass">
                     <h3 class="card-title"><i class="fa-solid fa-circle-info"></i> Status & Pogoda</h3>
                     <div class="weather-display">
@@ -64,7 +66,6 @@
                         <i class="fa-solid fa-circle-notch fa-spin"></i> Ładowanie statusu PIR...
                     </div>
                 </section>
-                
                 <section class="card ldr-panel glass">
                     <h3 class="card-title"><i class="fa-solid fa-sliders"></i> Automatyka & Progi LDR</h3>
                     <div class="automation-mode">
@@ -97,7 +98,6 @@
                         <button class="reset-button animated-btn" onclick="resetLdrSettings()"><i class="fa-solid fa-arrows-rotate"></i> Resetuj Progi</button>
                     </div>
                 </section>
-
                 <section class="card logs-panel glass">
                     <h3 class="card-title"><i class="fa-solid fa-list-ul"></i> Dziennik Zdarzeń</h3>
                     <div id="logsList" class="logs-list">
